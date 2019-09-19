@@ -23,7 +23,59 @@ typedef struct {
     struct pin_driver_t busack;
   } cpu_bus_control;
   struct pin_driver_t clk;
+
+  uint16_t state;
 } z80_t;
+
+#define pin_m1     (1 << 0)
+#define pin_mreq   (1 << 1)
+#define pin_iorq   (1 << 2)
+#define pin_rd     (1 << 3)
+#define pin_wr     (1 << 4)
+#define pin_rfsh   (1 << 5)
+#define pin_halt   (1 << 6)
+#define pin_wait   (1 << 7)
+#define pin_int    (1 << 7)
+#define pin_nmi    (1 << 8)
+#define pin_reset  (1 << 9)
+#define pin_busrq  (1 << 10)
+#define pin_busack (1 << 11)
+#define pin_clk    (1 << 12)
+
+#define set_high(z80, pin) (z80->state |= pin)
+#define set_low(pinstate, pin) (z80->state &= ~pin)
+#define pin_high(pinstate, pin) (pinstate & pin)
+#define pin_low(pinstate, pin) (!(pinstate & pin))
+
+void print_pin_state(uint16_t state) {
+  std_printf(FSTR("-- pin status --\n"));
+  std_printf(FSTR("m1: %i    mreq: %i    iorq: %i\n"), pin_high(state, pin_m1), pin_high(state, pin_mreq),
+      pin_high(state, pin_iorq));
+  std_printf(FSTR("rd: %i    wr: %i      rfsh: %i\n"), pin_high(state, pin_rd), pin_high(state, pin_wr),
+      pin_high(state, pin_rfsh));
+  std_printf(FSTR("halt: %i  wait: %i    int: %i\n"), pin_high(state, pin_halt), pin_high(state, pin_wait),
+      pin_high(state, pin_int));
+  std_printf(FSTR("nmi: %i   reset: %i   busrq: %i\n"), pin_high(state, pin_nmi), pin_high(state, pin_reset),
+      pin_high(state, pin_busrq));
+  std_printf(FSTR("busack: %i            clk: %i\n"), pin_high(state, pin_busack), pin_high(state, pin_clk));
+}
+
+void flush_pin_state(z80_t* z80) {
+  pin_write(&z80->system_control.m1, pin_high(z80->state, pin_m1));
+  pin_write(&z80->system_control.mreq, pin_high(z80->state, pin_mreq));
+  pin_write(&z80->system_control.iorq, pin_high(z80->state, pin_iorq));
+  pin_write(&z80->system_control.rd, pin_high(z80->state, pin_rd));
+  pin_write(&z80->system_control.wr, pin_high(z80->state, pin_wr));
+  pin_write(&z80->system_control.rfsh, pin_high(z80->state, pin_rfsh));
+  pin_write(&z80->cpu_control.phalt, pin_high(z80->state, pin_halt));
+  pin_write(&z80->cpu_control.pwait, pin_high(z80->state, pin_wait));
+  pin_write(&z80->cpu_control.pint, pin_high(z80->state, pin_int));
+  pin_write(&z80->cpu_control.pnmi, pin_high(z80->state, pin_nmi));
+  pin_write(&z80->cpu_control.preset, pin_high(z80->state, pin_reset));
+  pin_write(&z80->cpu_bus_control.busrq, pin_high(z80->state, pin_busrq));
+  pin_write(&z80->cpu_bus_control.busack, pin_high(z80->state, pin_busack));
+  pin_write(&z80->clk, pin_high(z80->state, pin_clk));
+}
 
 z80_t* new_z80() {
   z80_t* z80 = malloc(sizeof(z80_t));
@@ -88,12 +140,13 @@ z80_t* new_z80() {
 
 //static struct event_t clock_event;
 static struct timer_t clock_timer;
+static struct pin_driver_t led;
 
 static void clock_cb(void *arg_p) {
  // std_printf(FSTR("tick\n"));
 
   pin_toggle(&((z80_t*)arg_p)->clk);
-
+  pin_toggle(&led);
 
   //uint32_t mask = 0x01;
   //event_write_isr(&clock_event, &mask, sizeof(mask));
@@ -133,6 +186,8 @@ void clock_start(z80_t* z80) {
 }
 
 void boot(z80_t* z80) {
+  set_high(z80, pin_int);
+  set_high(z80, pin_nmi);
   pin_write(&z80->cpu_control.pint, 1);
   pin_write(&z80->cpu_control.pnmi, 1);
   pin_write(&z80->cpu_control.pwait, 1);
@@ -157,6 +212,8 @@ int main() {
   uart_start(&uart);
 
   sys_set_stdout(&uart.chout);
+
+  pin_init(&led, &pin_led_dev, PIN_OUTPUT);
 
   thrd_sleep_ms(1000);
   std_printf(FSTR("booting z80 cpu\n"));
