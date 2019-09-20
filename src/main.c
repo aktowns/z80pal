@@ -1,242 +1,174 @@
-#include "simba.h"
+/*
+ * Dummy environment for z80, boots and feeds nops
+ */
+#include <stdio.h>
+#include <avr/io.h>
+#include <avr/interrupt.h>
+#include <util/delay.h>
+#include <avr/pgmspace.h>
 
-typedef struct {
-  struct pin_driver_t address_bus[16];
-  struct pin_driver_t data_bus[8];
-  struct {
-    struct pin_driver_t m1;
-    struct pin_driver_t mreq;
-    struct pin_driver_t iorq;
-    struct pin_driver_t rd;
-    struct pin_driver_t wr;
-    struct pin_driver_t rfsh;
-  } system_control;
-  struct {
-    struct pin_driver_t phalt;
-    struct pin_driver_t pwait;
-    struct pin_driver_t pint;
-    struct pin_driver_t pnmi;
-    struct pin_driver_t preset;
-  } cpu_control;
-  struct {
-    struct pin_driver_t busrq;
-    struct pin_driver_t busack;
-  } cpu_bus_control;
-  struct pin_driver_t clk;
-
-  uint16_t state;
-} z80_t;
-
-#define pin_m1     (1 << 0)
-#define pin_mreq   (1 << 1)
-#define pin_iorq   (1 << 2)
-#define pin_rd     (1 << 3)
-#define pin_wr     (1 << 4)
-#define pin_rfsh   (1 << 5)
-#define pin_halt   (1 << 6)
-#define pin_wait   (1 << 7)
-#define pin_int    (1 << 7)
-#define pin_nmi    (1 << 8)
-#define pin_reset  (1 << 9)
-#define pin_busrq  (1 << 10)
-#define pin_busack (1 << 11)
-#define pin_clk    (1 << 12)
-
-#define set_high(z80, pin) (z80->state |= pin)
-#define set_low(pinstate, pin) (z80->state &= ~pin)
-#define pin_high(pinstate, pin) (pinstate & pin)
-#define pin_low(pinstate, pin) (!(pinstate & pin))
-
-void print_pin_state(uint16_t state) {
-  std_printf(FSTR("-- pin status --\n"));
-  std_printf(FSTR("m1: %i    mreq: %i    iorq: %i\n"), pin_high(state, pin_m1), pin_high(state, pin_mreq),
-      pin_high(state, pin_iorq));
-  std_printf(FSTR("rd: %i    wr: %i      rfsh: %i\n"), pin_high(state, pin_rd), pin_high(state, pin_wr),
-      pin_high(state, pin_rfsh));
-  std_printf(FSTR("halt: %i  wait: %i    int: %i\n"), pin_high(state, pin_halt), pin_high(state, pin_wait),
-      pin_high(state, pin_int));
-  std_printf(FSTR("nmi: %i   reset: %i   busrq: %i\n"), pin_high(state, pin_nmi), pin_high(state, pin_reset),
-      pin_high(state, pin_busrq));
-  std_printf(FSTR("busack: %i            clk: %i\n"), pin_high(state, pin_busack), pin_high(state, pin_clk));
-}
-
-void flush_pin_state(z80_t* z80) {
-  pin_write(&z80->system_control.m1, pin_high(z80->state, pin_m1));
-  pin_write(&z80->system_control.mreq, pin_high(z80->state, pin_mreq));
-  pin_write(&z80->system_control.iorq, pin_high(z80->state, pin_iorq));
-  pin_write(&z80->system_control.rd, pin_high(z80->state, pin_rd));
-  pin_write(&z80->system_control.wr, pin_high(z80->state, pin_wr));
-  pin_write(&z80->system_control.rfsh, pin_high(z80->state, pin_rfsh));
-  pin_write(&z80->cpu_control.phalt, pin_high(z80->state, pin_halt));
-  pin_write(&z80->cpu_control.pwait, pin_high(z80->state, pin_wait));
-  pin_write(&z80->cpu_control.pint, pin_high(z80->state, pin_int));
-  pin_write(&z80->cpu_control.pnmi, pin_high(z80->state, pin_nmi));
-  pin_write(&z80->cpu_control.preset, pin_high(z80->state, pin_reset));
-  pin_write(&z80->cpu_bus_control.busrq, pin_high(z80->state, pin_busrq));
-  pin_write(&z80->cpu_bus_control.busack, pin_high(z80->state, pin_busack));
-  pin_write(&z80->clk, pin_high(z80->state, pin_clk));
-}
-
-z80_t* new_z80() {
-  z80_t* z80 = malloc(sizeof(z80_t));
-
-  uint8_t i = 2;
-
-  // cpu control
-  std_printf(FSTR("halt: D%i\n"), i);
-  pin_init(&z80->cpu_control.phalt, &pin_device[i++], PIN_OUTPUT);
-  std_printf(FSTR("wait: D%i\n"), i);
-  pin_init(&z80->cpu_control.pwait, &pin_device[i++], PIN_OUTPUT);
-  std_printf(FSTR("int: D%i\n"), i);
-  pin_init(&z80->cpu_control.pint, &pin_device[i++], PIN_OUTPUT);
-  std_printf(FSTR("nmi: D%i\n"), i);
-  pin_init(&z80->cpu_control.pnmi, &pin_device[i++], PIN_OUTPUT);
-  std_printf(FSTR("reset: D%i\n"), i);
-  pin_init(&z80->cpu_control.preset, &pin_device[i++], PIN_OUTPUT);
-
-  // cpu bus control
-  std_printf(FSTR("busack: D%i\n"), i);
-  pin_init(&z80->cpu_bus_control.busack, &pin_device[i++], PIN_OUTPUT);
-  std_printf(FSTR("busrq: D%i\n"), i);
-  pin_init(&z80->cpu_bus_control.busrq, &pin_device[i++], PIN_OUTPUT);
-
-  i = 22;
-
-  // addressbus
-  std_printf(FSTR("address bus: D%i"), i);
-  for (uint8_t z = 0; z < 16; z++, i++)
-    pin_init(&z80->address_bus[z], &pin_device[i], PIN_INPUT);
-  std_printf(FSTR("-D%i\n"), i-1);
-
-  // databus
-  std_printf(FSTR("data bus: D%i"), i);
-  for (uint8_t z = 0; z < 8; z++, i++)
-    pin_init(&z80->data_bus[z], &pin_device[i], PIN_OUTPUT);
-  std_printf(FSTR("-D%i\n"), i-1);
-
-  // clock
-  std_printf(FSTR("clk: D%i\n"), i);
-  pin_init(&z80->clk, &pin_device[i++], PIN_OUTPUT);
-
-  // system control
-  std_printf(FSTR("m1: D%i\n"), i);
-  pin_init(&z80->system_control.m1, &pin_device[i++], PIN_OUTPUT);
-  std_printf(FSTR("mreq: D%i\n"), i);
-  pin_init(&z80->system_control.mreq, &pin_device[i++], PIN_OUTPUT);
-  std_printf(FSTR("iorq: D%i\n"), i);
-  pin_init(&z80->system_control.iorq, &pin_device[i++], PIN_OUTPUT);
-  std_printf(FSTR("rd: D%i\n"), i);
-  pin_init(&z80->system_control.rd, &pin_device[i++], PIN_OUTPUT);
-  std_printf(FSTR("wr: D%i\n"), i);
-  pin_init(&z80->system_control.wr, &pin_device[i++], PIN_OUTPUT);
-  std_printf(FSTR("rfsh: D%i\n"), i);
-  pin_init(&z80->system_control.rfsh, &pin_device[i++], PIN_OUTPUT);
-
-
-  return z80;
-}
-
+#define UART_BAUD 9600
 #define CLOCK_SPEED 1000
+#define TICK_SPEED 63974
 
-//static struct event_t clock_event;
-static struct timer_t clock_timer;
-static struct pin_driver_t led;
+#define write_data(byte) (PORTL = byte)
+#define read_address() ((uint16_t)(PINA | (PINC << 8)))
 
-static void clock_cb(void *arg_p) {
- // std_printf(FSTR("tick\n"));
+#define ADDR_A_0  PA0   // D22
+#define ADDR_A_1  PA1   // D23
+#define ADDR_A_2  PA2   // D24
+#define ADDR_A_3  PA3   // D25
+#define ADDR_A_4  PA4   // D26
+#define ADDR_A_5  PA5   // D27
+#define ADDR_A_6  PA6   // D28
+#define ADDR_A_7  PA7   // D29
+#define ADDR_C_8  PC7   // D30
+#define ADDR_C_9  PC6   // D31
+#define ADDR_C_10 PC5   // D32
+#define ADDR_C_11 PC4   // D33
+#define ADDR_C_12 PC3   // D34
+#define ADDR_C_13 PC2   // D35
+#define ADDR_C_14 PC1   // D36
+#define ADDR_C_15 PC0   // D37
 
-  pin_toggle(&((z80_t*)arg_p)->clk);
-  pin_toggle(&led);
+#define DATA_L_0  PL7   // D42
+#define DATA_L_1  PL6   // D43
+#define DATA_L_2  PL5   // D44
+#define DATA_L_3  PL4   // D45
+#define DATA_L_4  PL3   // D46
+#define DATA_L_5  PL2   // D47
+#define DATA_L_6  PL1   // D48
+#define DATA_L_7  PL0   // D49
 
-  //uint32_t mask = 0x01;
-  //event_write_isr(&clock_event, &mask, sizeof(mask));
-}
+#define HALT_E    PE4   // D2
+#define WAIT_E    PE5   // D3
+#define INT_G     PG5   // D4
+#define NMI_E     PE3   // D5
+#define RESET_H   PH3   // D6
 
-void write_data(z80_t* z80, uint8_t byte) {
-  std_printf(FSTR("writing: "));
-  for (uint8_t i = 0; i < 8; i++) {
-    int status = (byte >> 1) & 1;
-    std_printf(FSTR("%i to pin %i "), status, i);
-    pin_write(&z80->data_bus[i], status);
-  }
-  std_printf(FSTR("\n"));
-}
+#define M1_H      PH4   // D7
+#define MREQ_H    PH5   // D8
+#define IORQ_H    PH6   // D9
+#define RD_B      PB4   // D10
+#define WR_B      PB5   // D11
+#define RFSH_B    PB6   // D12
 
-uint16_t read_address(z80_t* z80) {
-  uint16_t out = 0;
-  for (uint8_t i = 0; i < 16; i++) {
-    int r = pin_read(&z80->address_bus[i]);
-    if (r)
-      out = out | (1 << i);
-  }
+#define CLK_B     PB7   // D13
 
-}
-
-void clock_start(z80_t* z80) {
-  //uint32_t mask;
-  struct time_t timeout;
-
-  //event_init(&clock_event);
-
-  timeout.seconds = 1;
-  timeout.nanoseconds = 0;
-
-  timer_init(&clock_timer, &timeout, clock_cb, z80, TIMER_PERIODIC);
-  timer_start(&clock_timer);
-}
-
-void boot(z80_t* z80) {
-  set_high(z80, pin_int);
-  set_high(z80, pin_nmi);
-  pin_write(&z80->cpu_control.pint, 1);
-  pin_write(&z80->cpu_control.pnmi, 1);
-  pin_write(&z80->cpu_control.pwait, 1);
-  pin_write(&z80->cpu_bus_control.busrq, 1);
-
-  thrd_sleep_ms(1000);
-  std_printf(FSTR("rebooting z80\n"));
-  pin_write(&z80->cpu_control.preset, 0);
-  thrd_sleep_ms(CLOCK_SPEED * 5);
-  pin_write(&z80->cpu_control.preset, 1);
-}
+#define BUSRQ_B   PB1   // D52
+#define BUSACK_B  PB0   // D53
 
 #define Z80_NOP (0b00000000)
 
+void setup_z80() {
+  DDRB = 0;
+  DDRE = 0;
+  DDRG = 0;
+  DDRH = 0;
+
+  // Setup address bus
+  DDRA = 0;
+  DDRC = 0;
+
+  // Setup data bus
+  DDRL = UINT8_MAX;
+
+  // Setup CPU Control
+  DDRE |= (0<<HALT_E)|(1<<WAIT_E)|(1<<NMI_E);
+  DDRG |= (1<<INT_G);
+  DDRH |= (1<<RESET_H);
+
+  // Setup CPU bus control
+  DDRB |= (0<<BUSACK_B)|(1<<BUSRQ_B);
+
+  // Setup Clock
+  DDRB |= (1<<CLK_B);
+
+  // Setup system control
+  DDRH |= (0<<M1_H)|(0<<MREQ_H)|(0<<IORQ_H);
+  DDRB |= (0<<RD_B)|(0<<WR_B)|(0<<RFSH_B);
+}
+
+static int tick_count = 0;
+
+ISR (TIMER1_OVF_vect) {
+  tick_count++;
+  if (tick_count > 10) {
+    PORTB ^= (1 << CLK_B);
+    tick_count = 0;
+  }
+  TCNT1 = TICK_SPEED;
+}
+
+void boot() {
+  PORTG |= (1<<INT_G);
+  PORTE |= (1<<NMI_E)|(1<<WAIT_E);
+  PORTB |= (1<<BUSRQ_B);
+
+  _delay_ms(1000);
+
+  PORTH |= (0<<RESET_H);
+  _delay_ms(CLOCK_SPEED * 5);
+  PORTH |= (1<<RESET_H);
+}
+
+
+int uart_putchar(char c, FILE *stream) {
+  if (c == '\a') {
+    fputs("*ring*\n", stderr);
+    return 0;
+  }
+
+  if (c == '\n')
+    uart_putchar('\r', stream);
+
+  loop_until_bit_is_set(UCSR0A, UDRE0);
+  UDR0 = c;
+
+  return 0;
+}
+
+FILE uart_str = FDEV_SETUP_STREAM(uart_putchar, NULL, _FDEV_SETUP_WRITE);
+
 int main() {
-  struct uart_driver_t uart;
+  // UART setup
+  UCSR0A = _BV(U2X0);
+  UBRR0L = (F_CPU / (8UL * UART_BAUD)) - 1;
+  UCSR0B = _BV(TXEN0);
 
-  sys_start();
+  stdout = stderr = &uart_str;
 
-  uart_module_init();
-  uart_init(&uart, &uart_device[0], 38400, NULL, 0);
-  uart_start(&uart);
+  _delay_ms(1000);
 
-  sys_set_stdout(&uart.chout);
+  // Clock
+  cli();
+  TCCR1A = 0x00;
+  TCCR1B = 0x00;
 
-  pin_init(&led, &pin_led_dev, PIN_OUTPUT);
+  TCNT1 = TICK_SPEED;
+  TCCR1B |= (1 << CS10) | (1 << CS12);
+  TIMSK1 |= (1 << TOIE1);
+  sei();
 
-  thrd_sleep_ms(1000);
-  std_printf(FSTR("booting z80 cpu\n"));
+  setup_z80();
+  boot();
 
-  z80_t* z80 = new_z80();
+  write_data(Z80_NOP);
 
-  clock_start(z80);
-
-  boot(z80);
-  write_data(z80, Z80_NOP);
-
-  //uint16_t addrq = 0;
-  //addrq = read_address(z80);
-
-  //std_printf(FSTR("address=0x%08x\n"), addrq);
+  uint16_t addrq = 0;
+  addrq = read_address();
+  printf_P(PSTR("address=0x%02x\n"), addrq);
 
   int z = 0;
   while (1) {
-    thrd_sleep_ms(1000);
+    _delay_ms(1000);
+
+    addrq = read_address();
+    printf_P(PSTR("address=0x%02x\n"), addrq);
 
     if (z == 30) {
-      boot(z80);
-      write_data(z80, Z80_NOP);
+      boot();
+      write_data(Z80_NOP);
       z = 0;
     }
     z++;
