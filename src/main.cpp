@@ -1,11 +1,10 @@
-/*
- * Dummy environment for z80, boots and feeds nops
- */
-#include <stdio.h>
+#include <stdio.h> // NOLINT(modernize-deprecated-headers,hicpp-deprecated-headers)
 #include <avr/io.h>
 #include <avr/interrupt.h>
 #include <util/delay.h>
 #include <avr/pgmspace.h>
+
+#include "digital.h"
 
 #define UART_BAUD 9600
 #define CLOCK_SPEED 1000
@@ -13,6 +12,21 @@
 
 #define write_data(byte) (PORTL = byte)
 #define read_address() (((uint16_t)PINA << 8u) | PINC)
+
+static IOPort PortA(&PORTA, &PINA, &DDRA);
+static IOPort PortB(&PORTB, &PINB, &DDRB);
+static IOPort PortC(&PORTC, &PINC, &DDRC);
+static IOPort PortD(&PORTD, &PIND, &DDRD);
+static IOPort PortE(&PORTE, &PINE, &DDRE);
+static IOPort PortF(&PORTF, &PINF, &DDRF);
+static IOPort PortG(&PORTG, &PING, &DDRG);
+static IOPort PortH(&PORTH, &PINH, &DDRH);
+static IOPort PortJ(&PORTJ, &PINJ, &DDRJ);
+static IOPort PortK(&PORTK, &PINK, &DDRK);
+static IOPort PortL(&PORTL, &PINL, &DDRL);
+
+#define ADDR_H PortA
+#define ADDR_L PortC
 
 #define ADDR_A_0  PA0   // D22
 #define ADDR_A_1  PA1   // D23
@@ -31,6 +45,7 @@
 #define ADDR_C_14 PC1   // D36
 #define ADDR_C_15 PC0   // D37
 
+#define DATA PortL
 #define DATA_L_0  PL7   // D42
 #define DATA_L_1  PL6   // D43
 #define DATA_L_2  PL5   // D44
@@ -40,60 +55,55 @@
 #define DATA_L_6  PL1   // D48
 #define DATA_L_7  PL0   // D49
 
-#define HALT_E    (unsigned)PE4   // D2
-#define WAIT_E    (unsigned)PE5   // D3
-#define INT_G     (unsigned)PG5   // D4
-#define NMI_E     (unsigned)PE3   // D5
-#define RESET_H   (unsigned)PH3   // D6
+#define HALT   (PortE[PE4])
+#define WAIT   (PortE[PE5])
+#define INT    (PortG[PG5])
+#define NMI    (PortE[PE3])
+#define RESET  (PortH[PH3])
 
-#define M1_H      (unsigned)PH4   // D7
-#define MREQ_H    (unsigned)PH5   // D8
-#define IORQ_H    (unsigned)PH6   // D9
-#define RD_B      (unsigned)PB4   // D10
-#define WR_B      (unsigned)PB5   // D11
-#define RFSH_B    (unsigned)PB6   // D12
+#define M1     (PortH[PH4])
+#define MREQ   (PortH[PH5])
+#define IORQ   (PortH[PH6])
+#define RD     (PortB[PB4])
+#define WR     (PortB[PB5])
+#define RFSH   (PortB[PB6])
 
-#define CLK_B     (unsigned)PB7   // D13
+#define CLK    (PortB[PB7])
 
-#define BUSRQ_B   (unsigned)PB1   // D52
-#define BUSACK_B  (unsigned)PB0   // D53
+#define BUSRQ  (PortB[PB1])
+#define BUSACK (PortB[PB0])
 
 #define Z80_NOP (0b00000000)
 
 void setup_z80() {
-  DDRB = 0;
-  DDRE = 0;
-  DDRG = 0;
-  DDRH = 0;
-
   // Setup address bus
-  DDRA = 0;
-  DDRC = 0;
+  PortA.setPortDirection(PinDirection::Input);
+  PortC.setPortDirection(PinDirection::Input);
 
   // Setup data bus
-  DDRL = 0b11111111;
+  PortL.setPortDirection(PinDirection::Output);
 
   // Setup CPU Control
-  DDRE &= ~(1u << HALT_E);
-  DDRE |= (1u << WAIT_E)
-       |  (1u << NMI_E);
-  DDRG |= (1u << INT_G);
-  DDRH |= (1u << RESET_H);
+  HALT.setInput();
+  WAIT.setOutput();
+  NMI.setOutput();
+  INT.setOutput();
+  RESET.setOutput();
 
   // Setup CPU bus control
-  DDRB &= ~(1u << BUSACK_B);
-  DDRB |= (1u << BUSRQ_B);
+  BUSACK.setInput();
+  BUSRQ.setOutput();
 
   // Setup Clock
-  DDRB |= (1u << CLK_B);
+  CLK.setOutput();
 
   // Setup system control
-  DDRH &= ~((1u << M1_H)
-           |(1u << MREQ_H)
-           |(1u << IORQ_H));
-  DDRB &= ~((1u << RD_B)
-           |(1u << WR_B)
-           |(1u << RFSH_B));
+  M1.setInput();
+  MREQ.setInput();
+  IORQ.setInput();
+  RD.setInput();
+  WR.setInput();
+  RFSH.setInput();
 }
 
 static int tick_count = 0;
@@ -101,27 +111,28 @@ static int tick_count = 0;
 ISR (TIMER1_OVF_vect) {
   tick_count++;
   if (tick_count > 5) {
-    PORTB ^= (1u << CLK_B);
+    CLK.toggle();
     tick_count = 0;
   }
   TCNT1 = TICK_SPEED;
 }
 
 void boot() {
-  PORTG |= (1u << INT_G);
-  PORTE |= (1u << NMI_E)
-        |  (1u << WAIT_E);
-  PORTB |= (1u << BUSRQ_B);
+  INT.setHigh();
+  NMI.setHigh();
+  WAIT.setHigh();
+  BUSRQ.setHigh();
 
-  PORTH |= (1u << RESET_H);
+  // cout << P("Rebooting..") << endl;
+
+  RESET.setHigh();
   _delay_ms(1000);
   printf_P(PSTR("Rebooting.."));
-  PORTH &= ~(1u << RESET_H);
+  RESET.setLow();
   _delay_ms(CLOCK_SPEED * 15);
-  PORTH |= (1u << RESET_H);
+  RESET.setHigh();
   printf_P(PSTR("Rebooted..\n"));
 }
-
 
 int uart_putchar(char c, FILE *stream) {
   if (c == '\a') {
@@ -129,16 +140,20 @@ int uart_putchar(char c, FILE *stream) {
     return 0;
   }
 
-  if (c == '\n')
-    uart_putchar('\r', stream);
+  if (c == '\n') { uart_putchar('\r', stream); }
 
-  loop_until_bit_is_set(UCSR0A, UDRE0); // NOLINT(hicpp-signed-bitwise)
+  loop_until_bit_is_set(UCSR0A, UDRE0);
   UDR0 = c;
 
   return 0;
 }
 
-FILE uart_str = FDEV_SETUP_STREAM(uart_putchar, NULL, _FDEV_SETUP_WRITE); // NOLINT(cert-fio38-c,misc-non-copyable-objects)
+FILE uart_str = { // NOLINT(cert-fio38-c,misc-non-copyable-objects)
+    .flags = _FDEV_SETUP_WRITE,
+    .put = uart_putchar,
+    .get = nullptr,
+    .udata = 0
+};
 
 int main() {
   // UART setup
@@ -172,8 +187,7 @@ int main() {
 
   int z = 0;
 
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wmissing-noreturn"
+
   while (1) {
     _delay_ms(1000);
 
@@ -206,7 +220,6 @@ int main() {
     }
     z++;
   }
-#pragma clang diagnostic pop
 
   return 0;
 }
